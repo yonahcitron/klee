@@ -50,6 +50,12 @@ build_libcxx() {
   else
     cmake_flags+=("-DLLVM_ENABLE_PROJECTS=libcxx;libcxxabi")
   fi
+  # LLVM 14-16 headers use uint64_t/uint32_t in SmallVector.h without
+  # including <cstdint>. Modern libstdc++ (GCC 13+) no longer provides
+  # that type transitively. Force-include it so the build succeeds.
+  if [[ "${LLVM_VERSION_SHORT}" -ge "140" && "${LLVM_VERSION_SHORT}" -lt "170" ]]; then
+    cmake_flags+=("-DCMAKE_CXX_FLAGS=-include cstdint")
+  fi
   # Static ABI libraries are not supported under OS X
   if [[ "${OS}" == "osx" ]]; then
     cmake_flags+=("-DLIBCXX_ENABLE_STATIC_ABI_LIBRARY:BOOL=OFF")

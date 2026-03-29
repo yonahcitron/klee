@@ -57,6 +57,7 @@ build_stp() {
   local minisat_cmake_args=(
     ${cmake_general_args[@]+"${cmake_general_args[@]}"}
     "-DCMAKE_INSTALL_PREFIX=${MINISAT_INSTALL_PATH}"
+    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
   )
   CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" LDFLAGS="${LDFLAGS}" \
     cmake "${minisat_cmake_args[@]}" "${BASE}/minisat"
@@ -77,6 +78,10 @@ build_stp() {
       "-DNOCRYPTOMINISAT=ON"
       "-DCMAKE_PREFIX_PATH=${MINISAT_INSTALL_PATH}"
       "-DCMAKE_INSTALL_PREFIX=${STP_INSTALL_PATH}"
+      # STP's CMakeLists.txt overrides CMAKE_INSTALL_RPATH with
+      # CMAKE_INSTALL_LIBDIR. Use an absolute libdir so the resulting
+      # RPATH lets libstp.so find sibling libs (e.g. libabc-pic.so).
+      "-DCMAKE_INSTALL_LIBDIR=${STP_INSTALL_PATH}/lib"
   )
 
   CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" LDFLAGS="${LDFLAGS}" \
@@ -85,6 +90,23 @@ build_stp() {
   # Try to build parallel
   make "-j$(nproc)" || make
   make install
+
+  # STP's install target doesn't install libabc-pic.so even though
+  # libstp.so is linked against it. Copy it manually and fix the
+  # exported cmake config which references an internal build target.
+  if [[ -f "${STP_BUILD_PATH}/lib/libabc-pic.so" ]]; then
+    cp "${STP_BUILD_PATH}/lib/libabc-pic.so" "${STP_INSTALL_PATH}/lib/"
+
+    # STP's exported STPTargets.cmake contains \$<TARGET_FILE:libabc-pic>
+    # in INTERFACE_LINK_LIBRARIES. That generator expression only works
+    # inside STP's own build tree. Replace it with the actual installed path.
+    local stp_targets_file="${STP_INSTALL_PATH}/lib/cmake/STP/STPTargets.cmake"
+    if [[ -f "${stp_targets_file}" ]]; then
+      sed -i 's|\\*\$<TARGET_FILE:libabc-pic>|'"${STP_INSTALL_PATH}/lib/libabc-pic.so"'|g' \
+        "${stp_targets_file}"
+    fi
+  fi
+
   touch "${STP_INSTALL_PATH}/.stp_installed"
 }
 
@@ -109,9 +131,6 @@ get_build_artifacts_stp() {
     setup_build_variables_stp
     echo "${MINISAT_INSTALL_PATH}"
     echo "${STP_INSTALL_PATH}"
-    if version_gt "${STP_VERSION}" "2.3.4"; then
-       echo "${ABC_INSTALL_PATH}"
-    fi
   )
 }
 
