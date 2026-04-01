@@ -1,25 +1,28 @@
+# Import base LLVM build functions (setup_build_variables_llvm, etc.)
+source "${DIR}/p-llvm.inc"
+
 # Build dependencies
 install_build_dependencies_llvm() {
   source "${DIR}/common-functions"
 
   dependencies=(
-    ca-certificates
     base-devel
-    autoconf
-    automake
-    groff
-    gcc
-    g++
-    python-distutils-extra
-    make
-    git # To check out code
-    zlib1g-dev
+    ca-certificates
     git
     ninja
+    python
+    python-setuptools # provides distutils (removed in Python 3.12+)
+    wget
+    zlib
   )
-  
+
   #Install essential dependencies
-  with_sudo pacman --no-confirm -S "${dependencies[@]}"
+  with_sudo pacman --noconfirm -Sy "${dependencies[@]}"
+
+  # LLVM 13–16 headers use a CRTP pattern in SmallVector.h that is
+  # rejected by GCC 13+ and Clang 16+ (P1787R6 strict two-phase
+  # name lookup). Build with GCC 11 to work around this.
+  setup_gcc11
 }
 
 install_binary_artifact_llvm() {
@@ -47,14 +50,17 @@ install_binary_artifact_llvm() {
   source "${DIR}/common-functions"
 
   dependencies=(
-    "llvm-${version}"
-    "llvm-${version}-dev"
-    "llvm-${version}-runtime"
-    "clang-${version}"
+    llvm
+    clang
   )
 
   # Install essential dependencies
-  with_sudo pacman --no-confirm -S "${dependencies[@]}" || return 1
+  with_sudo pacman --noconfirm -Sy "${dependencies[@]}" || return 1
+
+  # Arch provides only the latest LLVM; verify it matches the requested version
+  local lc
+  lc=$(command -v llvm-config) || return 1
+  check_llvm_config_version 1 "${lc}" || return 1
 }
 
 check_llvm_config_version() {
@@ -69,7 +75,7 @@ check_llvm_config_version() {
     # First check, if the provided llvm-config is a full path
     if [[ ! -f "${lc}" ]]; then
       # Nothing found, assume it's just the name of the binary in path, find the path
-      lc=$(which "${lc}")
+      lc=$(command -v "${lc}")
 
       # If path not found return error
       [[ -z "${lc}" ]] && return 1
@@ -101,35 +107,36 @@ check_llvm_config_version() {
 
 # Check if the binary artifact is installed
 is_installed_llvm() {
-  # Check for variables set and not empty
-  local LLVM_VERSION_MAJOR="${LLVM_VERSION/.*/}"
-  local version="${LLVM_VERSION_MAJOR}"
+  # First check if LLVM was built from source (computed install path)
+  (
+    setup_build_variables_llvm
+    [[ -f "${LLVM_INSTALL}/bin/llvm-config" ]]
+    [[ -f "${LLVM_INSTALL}/.install_finished" ]]
+  ) && return 0
 
-  # Check for llvm-config without suffix but correct version number
+  # Fall back to system LLVM (Arch provides llvm-config without version suffix)
   local lc
-
-  # First check with the version-specific number
-  lc=$(which "llvm-config-${LLVM_VERSION_MAJOR}")
+  lc=$(command -v llvm-config 2>/dev/null) || return 1
   check_llvm_config_version 1 "${lc}" && return 0
 
   return 1
 }
 
 setup_artifact_variables_llvm() {
-    # Check for variables set and not empty
-    local LLVM_VERSION_MAJOR="${LLVM_VERSION/.*/}"
-    local version="${LLVM_VERSION_MAJOR}"
-
-    local lc=""
-    # Check for llvm-config without suffix but correct version number
-    lc=$(which "llvm-config")
-    local is_ins
-    is_ins=$(check_llvm_config_version 1 "${lc}")
-    if [[ ! "${is_ins}" ]]; then
-      # Check if llvm-config with the right version exists
-      lc=$(which "llvm-config-${version}") || return 1
-      is_ins=$(check_llvm_config_version 1 "${lc}") || return 1
+    # First check if LLVM was built from source
+    setup_build_variables_llvm
+    if [[ -f "${LLVM_INSTALL}/bin/llvm-config" ]]; then
+        LLVM_CONFIG="${LLVM_INSTALL}/bin/llvm-config"
+        LLVM_BIN="${LLVM_INSTALL}/bin"
+        BITCODE_CC="${LLVM_BIN}/clang"
+        BITCODE_CXX="${LLVM_BIN}/clang++"
+        return 0
     fi
+
+    # Fall back to system LLVM (Arch provides llvm-config without version suffix)
+    local lc=""
+    lc=$(command -v "llvm-config") || return 1
+    check_llvm_config_version 1 "${lc}" || return 1
 
     LLVM_CONFIG="${lc}"
     LLVM_INSTALL="$(${lc} --prefix)"
@@ -139,6 +146,10 @@ setup_artifact_variables_llvm() {
 }
 
 get_build_artifacts_llvm() {
-  is_installed_llvm || return 1
-  return 0
+  (
+    setup_build_variables_llvm
+    echo "${LLVM_INSTALL}"
+    # Include GCC 11 install for downstream Docker stages that need it
+    echo "${BASE}/gcc-11-install"
+  )
 }

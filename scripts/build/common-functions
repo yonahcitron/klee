@@ -58,3 +58,71 @@ function version_gte() {
 function version_gt() {
     ! version_gte "$2" "$1"
 }
+
+# Arch-specific helper: ensure GCC 11 is available as CC/CXX.
+# LLVM 13-16 headers use CRTP patterns that trigger P1787R6 strict
+# two-phase name lookup errors with GCC 13+ and Clang 22+.
+# Builds GCC 11.5.0 from source once and caches in $BASE/gcc-11-install.
+setup_gcc11() {
+  local gcc_ver
+  gcc_ver=$(gcc -dumpversion 2>/dev/null || echo "0")
+  local gcc_major="${gcc_ver%%.*}"
+
+  if [[ "${gcc_major}" == "11" ]]; then
+    export CC=gcc
+    export CXX=g++
+    return 0
+  fi
+
+  local GCC_INSTALL="${BASE}/gcc-11-install"
+
+  if [[ -x "${GCC_INSTALL}/bin/gcc" ]]; then
+    echo "Using cached GCC 11 from ${GCC_INSTALL}"
+    local sys_libstdcxx
+    sys_libstdcxx=$(ldconfig -p | grep 'libstdc++.so.6' | grep 'x86-64' | awk '{print $NF}' | head -1)
+    if [[ -n "${sys_libstdcxx}" && "$(readlink "${GCC_INSTALL}/lib64/libstdc++.so.6")" != "${sys_libstdcxx}" ]]; then
+      ln -sf "${sys_libstdcxx}" "${GCC_INSTALL}/lib64/libstdc++.so.6"
+      ln -sf "${sys_libstdcxx}" "${GCC_INSTALL}/lib64/libstdc++.so"
+    fi
+    export CC="${GCC_INSTALL}/bin/gcc"
+    export CXX="${GCC_INSTALL}/bin/g++"
+    return 0
+  fi
+
+  echo "Building GCC 11.5.0 from source (one-time, takes a while)..."
+  local GCC_VERSION="11.5.0"
+  local GCC_SRC="${BASE}/gcc-${GCC_VERSION}"
+  local GCC_BUILD="${BASE}/gcc-11-build"
+
+  if [[ ! -d "${GCC_SRC}" ]]; then
+    mkdir -p "${BASE}"
+    cd "${BASE}"
+    wget -q "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
+    tar xf "gcc-${GCC_VERSION}.tar.xz"
+    rm -f "gcc-${GCC_VERSION}.tar.xz"
+    cd "${GCC_SRC}"
+    ./contrib/download_prerequisites
+  fi
+
+  mkdir -p "${GCC_BUILD}"
+  cd "${GCC_BUILD}"
+  "${GCC_SRC}/configure" \
+    --prefix="${GCC_INSTALL}" \
+    --enable-languages=c,c++ \
+    --disable-multilib \
+    --disable-bootstrap \
+    --disable-libsanitizer
+
+  make -j"$(nproc)"
+  make install
+
+  local sys_libstdcxx
+  sys_libstdcxx=$(ldconfig -p | grep 'libstdc++.so.6' | grep 'x86-64' | awk '{print $NF}' | head -1)
+  if [[ -n "${sys_libstdcxx}" ]]; then
+    ln -sf "${sys_libstdcxx}" "${GCC_INSTALL}/lib64/libstdc++.so.6"
+    ln -sf "${sys_libstdcxx}" "${GCC_INSTALL}/lib64/libstdc++.so"
+  fi
+
+  export CC="${GCC_INSTALL}/bin/gcc"
+  export CXX="${GCC_INSTALL}/bin/g++"
+}
