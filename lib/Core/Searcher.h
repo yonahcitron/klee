@@ -322,12 +322,17 @@ namespace klee {
 
     unsigned roundRobinIndex{0};
 
+    uint64_t tier1Selections{0};
+    uint64_t tier2Selections{0};
+    uint64_t tier3Selections{0};
+    uint64_t tier1Classifications{0};
+
     void addToTier1(ExecutionState *state);
     void removeFromTier1(ExecutionState *state);
 
   public:
     explicit ParserGuidedSearcher(RNG &rng);
-    ~ParserGuidedSearcher() override = default;
+    ~ParserGuidedSearcher() override;
 
     ExecutionState &selectState() override;
     void update(ExecutionState *current,

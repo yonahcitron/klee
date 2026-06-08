@@ -576,6 +576,7 @@ bool ParserGuidedSearcher::isInputByteEquality(const ref<Expr> &e) {
 }
 
 void ParserGuidedSearcher::addToTier1(ExecutionState *state) {
+  ++tier1Classifications;
   if (tier1Set.insert(state).second)
     tier1States.push_back(state);
 }
@@ -592,6 +593,18 @@ ParserGuidedSearcher::ParserGuidedSearcher(RNG &rng)
     : tier3Searcher(std::make_unique<WeightedRandomSearcher>(
           WeightedRandomSearcher::CoveringNew, rng)) {}
 
+ParserGuidedSearcher::~ParserGuidedSearcher() {
+  uint64_t total = tier1Selections + tier2Selections + tier3Selections;
+  klee_message("ParserGuidedSearcher stats: "
+               "selections T1=%lu T2=%lu T3=%lu total=%lu | "
+               "tier1 classifications=%lu",
+               (unsigned long)tier1Selections,
+               (unsigned long)tier2Selections,
+               (unsigned long)tier3Selections,
+               (unsigned long)total,
+               (unsigned long)tier1Classifications);
+}
+
 ExecutionState &ParserGuidedSearcher::selectState() {
   unsigned startTier = roundRobinIndex % 3;
   roundRobinIndex++;
@@ -599,16 +612,22 @@ ExecutionState &ParserGuidedSearcher::selectState() {
   for (unsigned i = 0; i < 3; ++i) {
     switch ((startTier + i) % 3) {
     case 0:
-      if (!tier1States.empty())
+      if (!tier1States.empty()) {
+        ++tier1Selections;
         return *tier1States.back();
+      }
       break;
     case 1:
-      if (!tier2States.empty())
+      if (!tier2States.empty()) {
+        ++tier2Selections;
         return *tier2States.front();
+      }
       break;
     case 2:
-      if (!tier3Searcher->empty())
+      if (!tier3Searcher->empty()) {
+        ++tier3Selections;
         return tier3Searcher->selectState();
+      }
       break;
     }
   }
