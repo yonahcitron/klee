@@ -18,9 +18,11 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <deque>
 #include <map>
 #include <queue>
 #include <set>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm {
@@ -71,7 +73,8 @@ namespace klee {
       NURS_RP,
       NURS_ICnt,
       NURS_CPICnt,
-      NURS_QC
+      NURS_QC,
+      ParserGuided
     };
   };
 
@@ -296,6 +299,44 @@ namespace klee {
                 const std::vector<ExecutionState *> &removedStates) override;
     bool empty() override;
     void printName(llvm::raw_ostream &os) override;
+  };
+
+  /// ParserGuidedSearcher is a three-tier priority searcher that accelerates
+  /// KLEE on parser-heavy subjects by prioritising states whose most recent
+  /// fork condition is an input-byte equality against a constant (the "known
+  /// value" signal from strcmp-leaked keywords and delimiter checks).
+  ///
+  /// Tier 1 (known-value, DFS): states where the fork pinned an input byte
+  ///   to a specific constant — rides the keyword chain deep.
+  /// Tier 2 (BFS): all states in FIFO order — fans out across siblings.
+  /// Tier 3 (covnew): weighted random by coverage-new — drives progression.
+  ///
+  /// Selection round-robins across tiers, skipping empty ones.
+  class ParserGuidedSearcher final : public Searcher {
+    std::vector<ExecutionState *> tier1States;
+    std::unordered_set<ExecutionState *> tier1Set;
+
+    std::deque<ExecutionState *> tier2States;
+
+    std::unique_ptr<WeightedRandomSearcher> tier3Searcher;
+
+    unsigned roundRobinIndex{0};
+
+    void addToTier1(ExecutionState *state);
+    void removeFromTier1(ExecutionState *state);
+
+  public:
+    explicit ParserGuidedSearcher(RNG &rng);
+    ~ParserGuidedSearcher() override = default;
+
+    ExecutionState &selectState() override;
+    void update(ExecutionState *current,
+                const std::vector<ExecutionState *> &addedStates,
+                const std::vector<ExecutionState *> &removedStates) override;
+    bool empty() override;
+    void printName(llvm::raw_ostream &os) override;
+
+    static bool isInputByteEquality(const ref<Expr> &e);
   };
 
   /// InterleavedSearcher selects states from a set of searchers in round-robin

@@ -14,6 +14,7 @@
 #include "Core/ExecutionTree.h"
 #include "Core/Searcher.h"
 #include "klee/ADT/RNG.h"
+#include "klee/Expr/ArrayCache.h"
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -199,6 +200,40 @@ TEST(SearcherTest, TwoRandomPathDot) {
   EXPECT_EQ(modelExecutionTreeDot.str(), executionTreeDotStream.str());
   executionTree.remove(es1.executionTreeNode);
   executionTree.remove(root.executionTreeNode);
+}
+
+TEST(SearcherTest, IsInputByteEquality) {
+  ArrayCache ac;
+  const Array *symArray = ac.CreateArray("stdin", 32);
+
+  // Eq(const_8bit, Read(symbolic, const_index)) — the positive case.
+  ref<Expr> readByte0 =
+      ReadExpr::create(UpdateList(symArray, nullptr),
+                       ConstantExpr::alloc(0, Expr::Int32));
+  ref<Expr> eqKnown = EqExpr::create(
+      ConstantExpr::alloc('w', Expr::Int8), readByte0);
+  EXPECT_TRUE(ParserGuidedSearcher::isInputByteEquality(eqKnown));
+
+  // Negation: Eq(false_1bit, Eq(...)) — the false-branch constraint.
+  ref<Expr> negated = Expr::createIsZero(eqKnown);
+  EXPECT_FALSE(ParserGuidedSearcher::isInputByteEquality(negated));
+
+  // Range check (Ule) — not an equality at all.
+  ref<Expr> rangeCheck = UleExpr::create(readByte0,
+      ConstantExpr::alloc('z', Expr::Int8));
+  EXPECT_FALSE(ParserGuidedSearcher::isInputByteEquality(rangeCheck));
+
+  // Read at symbolic index — unknown byte position, should reject.
+  // Use alloc to bypass ReadExpr::create optimisation.
+  ref<Expr> readSymIdx =
+      ReadExpr::alloc(UpdateList(symArray, nullptr), readByte0);
+  ref<Expr> eqSymIdx =
+      EqExpr::alloc(ConstantExpr::alloc('w', Expr::Int8), readSymIdx);
+  EXPECT_FALSE(ParserGuidedSearcher::isInputByteEquality(eqSymIdx));
+
+  // Plain constant — not an EqExpr.
+  ref<Expr> constTrue = ConstantExpr::alloc(1, Expr::Bool);
+  EXPECT_FALSE(ParserGuidedSearcher::isInputByteEquality(constTrue));
 }
 
 TEST(SearcherDeathTest, TooManyRandomPaths) {

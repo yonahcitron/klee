@@ -545,6 +545,137 @@ void IterativeDeepeningTimeSearcher::printName(llvm::raw_ostream &os) {
 
 ///
 
+bool ParserGuidedSearcher::isInputByteEquality(const ref<Expr> &e) {
+  auto *eq = dyn_cast<EqExpr>(e);
+  if (!eq)
+    return false;
+
+  // Canonical form: constant on the left.
+  auto *constSide = dyn_cast<ConstantExpr>(eq->left);
+  if (!constSide)
+    return false;
+
+  // Eq(false_1bit, X) is a negation (the false-branch constraint), not an
+  // equality pinning a byte to a value.
+  if (constSide->getWidth() == Expr::Bool && constSide->isFalse())
+    return false;
+
+  // The right-hand side must be a ReadExpr from a symbolic array at a
+  // constant index — i.e. "input byte N == constant C".
+  auto *readSide = dyn_cast<ReadExpr>(eq->right);
+  if (!readSide)
+    return false;
+
+  if (!readSide->updates.root->isSymbolicArray())
+    return false;
+
+  if (!isa<ConstantExpr>(readSide->index))
+    return false;
+
+  return true;
+}
+
+void ParserGuidedSearcher::addToTier1(ExecutionState *state) {
+  if (tier1Set.insert(state).second)
+    tier1States.push_back(state);
+}
+
+void ParserGuidedSearcher::removeFromTier1(ExecutionState *state) {
+  if (tier1Set.erase(state)) {
+    auto it = std::find(tier1States.begin(), tier1States.end(), state);
+    assert(it != tier1States.end());
+    tier1States.erase(it);
+  }
+}
+
+ParserGuidedSearcher::ParserGuidedSearcher(RNG &rng)
+    : tier3Searcher(std::make_unique<WeightedRandomSearcher>(
+          WeightedRandomSearcher::CoveringNew, rng)) {}
+
+ExecutionState &ParserGuidedSearcher::selectState() {
+  unsigned startTier = roundRobinIndex % 3;
+  roundRobinIndex++;
+
+  for (unsigned i = 0; i < 3; ++i) {
+    switch ((startTier + i) % 3) {
+    case 0:
+      if (!tier1States.empty())
+        return *tier1States.back();
+      break;
+    case 1:
+      if (!tier2States.empty())
+        return *tier2States.front();
+      break;
+    case 2:
+      if (!tier3Searcher->empty())
+        return tier3Searcher->selectState();
+      break;
+    }
+  }
+
+  llvm_unreachable("ParserGuidedSearcher::selectState called when empty");
+}
+
+void ParserGuidedSearcher::update(
+    ExecutionState *current, const std::vector<ExecutionState *> &addedStates,
+    const std::vector<ExecutionState *> &removedStates) {
+
+  // Forward to tier 3 (covnew) — it maintains its own weighted structure.
+  tier3Searcher->update(current, addedStates, removedStates);
+
+  // Remove terminated states from tiers 1 and 2.
+  for (const auto state : removedStates) {
+    removeFromTier1(state);
+    if (state == tier2States.front()) {
+      tier2States.pop_front();
+    } else {
+      auto it = std::find(tier2States.begin(), tier2States.end(), state);
+      assert(it != tier2States.end() && "invalid state removed");
+      tier2States.erase(it);
+    }
+  }
+
+  // When a fork happened, current was modified in-place (got a new
+  // constraint).  Move it to the back of the BFS queue and re-classify.
+  if (!addedStates.empty() && current &&
+      std::find(removedStates.begin(), removedStates.end(), current) ==
+          removedStates.end()) {
+    auto pos = std::find(tier2States.begin(), tier2States.end(), current);
+    assert(pos != tier2States.end());
+    tier2States.erase(pos);
+    tier2States.push_back(current);
+
+    // Re-classify: remove from tier 1 first, then maybe re-add.
+    removeFromTier1(current);
+    if (!current->constraints.empty()) {
+      ref<Expr> lastConstraint = *std::prev(current->constraints.end());
+      if (isInputByteEquality(lastConstraint))
+        addToTier1(current);
+    }
+  }
+
+  // Add new states to tier 2 (BFS) and classify for tier 1.
+  for (const auto state : addedStates) {
+    tier2States.push_back(state);
+    if (!state->constraints.empty()) {
+      ref<Expr> lastConstraint = *std::prev(state->constraints.end());
+      if (isInputByteEquality(lastConstraint))
+        addToTier1(state);
+    }
+  }
+}
+
+bool ParserGuidedSearcher::empty() {
+  return tier2States.empty();
+}
+
+void ParserGuidedSearcher::printName(llvm::raw_ostream &os) {
+  os << "ParserGuidedSearcher\n";
+}
+
+
+///
+
 InterleavedSearcher::InterleavedSearcher(const std::vector<Searcher*> &_searchers) {
   searchers.reserve(_searchers.size());
   for (auto searcher : _searchers)
