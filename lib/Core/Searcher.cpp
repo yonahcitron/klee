@@ -36,6 +36,7 @@ DISABLE_WARNING_POP
 
 #include <cassert>
 #include <cmath>
+#include <optional>
 
 using namespace klee;
 using namespace llvm;
@@ -545,30 +546,31 @@ void IterativeDeepeningTimeSearcher::printName(llvm::raw_ostream &os) {
 
 ///
 
-bool ParserGuidedSearcher::isInputByteEquality(const ref<Expr> &e) {
+std::optional<uint8_t>
+ParserGuidedSearcher::getInputByteEqConstant(const ref<Expr> &e) {
   auto *eq = dyn_cast<EqExpr>(e);
   if (!eq)
-    return false;
+    return std::nullopt;
 
   auto *constSide = dyn_cast<ConstantExpr>(eq->left);
   if (!constSide)
-    return false;
+    return std::nullopt;
 
   // Eq(false_1bit, X) is a negation, not an equality pinning a byte.
   if (constSide->getWidth() == Expr::Bool && constSide->isFalse())
-    return false;
+    return std::nullopt;
 
   auto *readSide = dyn_cast<ReadExpr>(eq->right);
   if (!readSide)
-    return false;
+    return std::nullopt;
 
   if (!readSide->updates.root->isSymbolicArray())
-    return false;
+    return std::nullopt;
 
   if (!isa<ConstantExpr>(readSide->index))
-    return false;
+    return std::nullopt;
 
-  return true;
+  return static_cast<uint8_t>(constSide->getZExtValue());
 }
 
 void ParserGuidedSearcher::addState(ExecutionState *state) {
@@ -592,12 +594,15 @@ void ParserGuidedSearcher::removeState(ExecutionState *state) {
 }
 
 void ParserGuidedSearcher::classifyAndUpdate(ExecutionState *state,
-                                              bool newConstraintIsByteEq) {
-  // v3: increment depth for every byte equality — each matched byte
-  // (whether from strcmp or single-character dispatch) counts as +1.
-  if (newConstraintIsByteEq) {
-    state->parserMatchDepth++;
+                                              std::optional<uint8_t> byteEqConst) {
+  // v4: only increment depth for distinct constant values.  The first
+  // Eq(Read(stdin,_), C) for a given C earns +1; subsequent matches of
+  // the same C (e.g. checking '\n' at every string position) do not.
+  if (byteEqConst.has_value()) {
     ++byteEqHits;
+    if (state->seenMatchConstants.insert(byteEqConst.value()).second) {
+      state->parserMatchDepth++;
+    }
   }
 }
 
@@ -611,9 +616,9 @@ ParserGuidedSearcher::~ParserGuidedSearcher() {
   for (const auto &pair : depthBuckets)
     if (pair.first > maxDepth)
       maxDepth = pair.first;
-  klee_message("ParserGuidedSearcher v3 stats: "
+  klee_message("ParserGuidedSearcher v4 stats: "
                "selections depth=%lu covnew=%lu total=%lu | "
-               "byte-eq hits=%lu | max depth seen=%u",
+               "byte-eq hits=%lu (distinct credited) | max depth seen=%u",
                (unsigned long)depthSelections,
                (unsigned long)covnewSelections,
                (unsigned long)total,
@@ -664,22 +669,22 @@ void ParserGuidedSearcher::update(
           removedStates.end()) {
     removeState(current);
 
-    bool isByteEq = false;
+    std::optional<uint8_t> byteEqConst;
     if (!current->constraints.empty()) {
       ref<Expr> last = *std::prev(current->constraints.end());
-      isByteEq = isInputByteEquality(last);
+      byteEqConst = getInputByteEqConstant(last);
     }
-    classifyAndUpdate(current, isByteEq);
+    classifyAndUpdate(current, byteEqConst);
     addState(current);
   }
 
   for (const auto state : addedStates) {
-    bool isByteEq = false;
+    std::optional<uint8_t> byteEqConst;
     if (!state->constraints.empty()) {
       ref<Expr> last = *std::prev(state->constraints.end());
-      isByteEq = isInputByteEquality(last);
+      byteEqConst = getInputByteEqConstant(last);
     }
-    classifyAndUpdate(state, isByteEq);
+    classifyAndUpdate(state, byteEqConst);
     addState(state);
   }
 }

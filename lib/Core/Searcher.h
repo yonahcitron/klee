@@ -20,6 +20,7 @@
 
 #include <deque>
 #include <map>
+#include <optional>
 #include <queue>
 #include <set>
 #include <unordered_map>
@@ -335,7 +336,7 @@ namespace klee {
 
     void addState(ExecutionState *state);
     void removeState(ExecutionState *state);
-    void classifyAndUpdate(ExecutionState *state, bool newConstraintIsByteEq);
+    void classifyAndUpdate(ExecutionState *state, std::optional<uint8_t> byteEqConst);
 
   public:
     explicit ParserGuidedSearcher(RNG &rng);
@@ -348,7 +349,7 @@ namespace klee {
     bool empty() override;
     void printName(llvm::raw_ostream &os) override;
 
-    static bool isInputByteEquality(const ref<Expr> &e);
+    static std::optional<uint8_t> getInputByteEqConstant(const ref<Expr> &e);
   };
 
   /// InterleavedSearcher selects states from a set of searchers in round-robin
