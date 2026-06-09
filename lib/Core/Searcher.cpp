@@ -550,18 +550,14 @@ bool ParserGuidedSearcher::isInputByteEquality(const ref<Expr> &e) {
   if (!eq)
     return false;
 
-  // Canonical form: constant on the left.
   auto *constSide = dyn_cast<ConstantExpr>(eq->left);
   if (!constSide)
     return false;
 
-  // Eq(false_1bit, X) is a negation (the false-branch constraint), not an
-  // equality pinning a byte to a value.
+  // Eq(false_1bit, X) is a negation, not an equality pinning a byte.
   if (constSide->getWidth() == Expr::Bool && constSide->isFalse())
     return false;
 
-  // The right-hand side must be a ReadExpr from a symbolic array at a
-  // constant index — i.e. "input byte N == constant C".
   auto *readSide = dyn_cast<ReadExpr>(eq->right);
   if (!readSide)
     return false;
@@ -575,61 +571,80 @@ bool ParserGuidedSearcher::isInputByteEquality(const ref<Expr> &e) {
   return true;
 }
 
-void ParserGuidedSearcher::addToTier1(ExecutionState *state) {
-  ++tier1Classifications;
-  if (tier1Set.insert(state).second)
-    tier1States.push_back(state);
+void ParserGuidedSearcher::addState(ExecutionState *state) {
+  uint32_t depth = state->parserMatchDepth;
+  depthBuckets[depth].push_back(state);
+  stateBucket[state] = depth;
 }
 
-void ParserGuidedSearcher::removeFromTier1(ExecutionState *state) {
-  if (tier1Set.erase(state)) {
-    auto it = std::find(tier1States.begin(), tier1States.end(), state);
-    assert(it != tier1States.end());
-    tier1States.erase(it);
+void ParserGuidedSearcher::removeState(ExecutionState *state) {
+  auto it = stateBucket.find(state);
+  if (it == stateBucket.end())
+    return;
+  uint32_t depth = it->second;
+  auto &bucket = depthBuckets[depth];
+  auto pos = std::find(bucket.begin(), bucket.end(), state);
+  if (pos != bucket.end())
+    bucket.erase(pos);
+  if (bucket.empty())
+    depthBuckets.erase(depth);
+  stateBucket.erase(it);
+}
+
+void ParserGuidedSearcher::classifyAndUpdate(ExecutionState *state,
+                                              bool newConstraintIsByteEq) {
+  // Detect completed byte-equality chain: previous constraint was a byte
+  // equality, current one is not — the keyword match just finished.
+  if (state->prevConstraintWasByteEq && !newConstraintIsByteEq) {
+    state->parserMatchDepth++;
+    ++matchCompletions;
   }
+  state->prevConstraintWasByteEq = newConstraintIsByteEq;
 }
 
 ParserGuidedSearcher::ParserGuidedSearcher(RNG &rng)
-    : tier3Searcher(std::make_unique<WeightedRandomSearcher>(
+    : covnewSearcher(std::make_unique<WeightedRandomSearcher>(
           WeightedRandomSearcher::CoveringNew, rng)) {}
 
 ParserGuidedSearcher::~ParserGuidedSearcher() {
-  uint64_t total = tier1Selections + tier2Selections + tier3Selections;
-  klee_message("ParserGuidedSearcher stats: "
-               "selections T1=%lu T2=%lu T3=%lu total=%lu | "
-               "tier1 classifications=%lu",
-               (unsigned long)tier1Selections,
-               (unsigned long)tier2Selections,
-               (unsigned long)tier3Selections,
+  uint64_t total = depthSelections + covnewSelections;
+  uint32_t maxDepth = 0;
+  for (const auto &pair : depthBuckets)
+    if (pair.first > maxDepth)
+      maxDepth = pair.first;
+  klee_message("ParserGuidedSearcher v2 stats: "
+               "selections depth=%lu covnew=%lu total=%lu | "
+               "match completions=%lu | max depth seen=%u",
+               (unsigned long)depthSelections,
+               (unsigned long)covnewSelections,
                (unsigned long)total,
-               (unsigned long)tier1Classifications);
+               (unsigned long)matchCompletions,
+               (unsigned)maxDepth);
 }
 
 ExecutionState &ParserGuidedSearcher::selectState() {
-  unsigned startTier = roundRobinIndex % 3;
+  // 3:1 ratio — depth-priority buckets vs covnew fallback.
+  bool tryCovnew = (roundRobinIndex % 4 == 3);
   roundRobinIndex++;
 
-  for (unsigned i = 0; i < 3; ++i) {
-    switch ((startTier + i) % 3) {
-    case 0:
-      if (!tier1States.empty()) {
-        ++tier1Selections;
-        return *tier1States.back();
-      }
-      break;
-    case 1:
-      if (!tier2States.empty()) {
-        ++tier2Selections;
-        return *tier2States.front();
-      }
-      break;
-    case 2:
-      if (!tier3Searcher->empty()) {
-        ++tier3Selections;
-        return tier3Searcher->selectState();
-      }
-      break;
+  if (tryCovnew && !covnewSearcher->empty()) {
+    ++covnewSelections;
+    return covnewSearcher->selectState();
+  }
+
+  // Select from highest-depth non-empty bucket (DFS: take from back).
+  if (!depthBuckets.empty()) {
+    auto &highest = depthBuckets.rbegin()->second;
+    if (!highest.empty()) {
+      ++depthSelections;
+      return *highest.back();
     }
+  }
+
+  // Fallback to covnew.
+  if (!covnewSearcher->empty()) {
+    ++covnewSelections;
+    return covnewSearcher->selectState();
   }
 
   llvm_unreachable("ParserGuidedSearcher::selectState called when empty");
@@ -639,53 +654,39 @@ void ParserGuidedSearcher::update(
     ExecutionState *current, const std::vector<ExecutionState *> &addedStates,
     const std::vector<ExecutionState *> &removedStates) {
 
-  // Forward to tier 3 (covnew) — it maintains its own weighted structure.
-  tier3Searcher->update(current, addedStates, removedStates);
+  covnewSearcher->update(current, addedStates, removedStates);
 
-  // Remove terminated states from tiers 1 and 2.
-  for (const auto state : removedStates) {
-    removeFromTier1(state);
-    if (state == tier2States.front()) {
-      tier2States.pop_front();
-    } else {
-      auto it = std::find(tier2States.begin(), tier2States.end(), state);
-      assert(it != tier2States.end() && "invalid state removed");
-      tier2States.erase(it);
-    }
-  }
+  for (const auto state : removedStates)
+    removeState(state);
 
-  // When a fork happened, current was modified in-place (got a new
-  // constraint).  Move it to the back of the BFS queue and re-classify.
+  // Re-classify current state if it forked (got a new constraint).
   if (!addedStates.empty() && current &&
       std::find(removedStates.begin(), removedStates.end(), current) ==
           removedStates.end()) {
-    auto pos = std::find(tier2States.begin(), tier2States.end(), current);
-    assert(pos != tier2States.end());
-    tier2States.erase(pos);
-    tier2States.push_back(current);
+    removeState(current);
 
-    // Re-classify: remove from tier 1 first, then maybe re-add.
-    removeFromTier1(current);
+    bool isByteEq = false;
     if (!current->constraints.empty()) {
-      ref<Expr> lastConstraint = *std::prev(current->constraints.end());
-      if (isInputByteEquality(lastConstraint))
-        addToTier1(current);
+      ref<Expr> last = *std::prev(current->constraints.end());
+      isByteEq = isInputByteEquality(last);
     }
+    classifyAndUpdate(current, isByteEq);
+    addState(current);
   }
 
-  // Add new states to tier 2 (BFS) and classify for tier 1.
   for (const auto state : addedStates) {
-    tier2States.push_back(state);
+    bool isByteEq = false;
     if (!state->constraints.empty()) {
-      ref<Expr> lastConstraint = *std::prev(state->constraints.end());
-      if (isInputByteEquality(lastConstraint))
-        addToTier1(state);
+      ref<Expr> last = *std::prev(state->constraints.end());
+      isByteEq = isInputByteEquality(last);
     }
+    classifyAndUpdate(state, isByteEq);
+    addState(state);
   }
 }
 
 bool ParserGuidedSearcher::empty() {
-  return tier2States.empty();
+  return depthBuckets.empty() && covnewSearcher->empty();
 }
 
 void ParserGuidedSearcher::printName(llvm::raw_ostream &os) {

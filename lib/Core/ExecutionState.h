@@ -179,6 +179,16 @@ public:
   /// @brief Exploration depth, i.e., number of times KLEE branched for this state
   std::uint32_t depth = 0;
 
+  /// @brief Number of completed input-byte-equality chains (e.g. strcmp
+  /// keyword matches).  Used by ParserGuidedSearcher to prioritise states
+  /// that have progressed further through parser keyword lookups.
+  std::uint32_t parserMatchDepth = 0;
+
+  /// @brief Whether this state's previous constraint was a byte equality.
+  /// Used to detect the transition out of a byte-equality chain (i.e.
+  /// the end of a keyword match).
+  bool prevConstraintWasByteEq = false;
+
   /// @brief Address space used by this state (e.g. Global and Heap)
   AddressSpace addressSpace;
 

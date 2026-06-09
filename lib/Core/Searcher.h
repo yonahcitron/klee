@@ -22,6 +22,7 @@
 #include <map>
 #include <queue>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -301,34 +302,41 @@ namespace klee {
     void printName(llvm::raw_ostream &os) override;
   };
 
-  /// ParserGuidedSearcher is a three-tier priority searcher that accelerates
-  /// KLEE on parser-heavy subjects by prioritising states whose most recent
-  /// fork condition is an input-byte equality against a constant (the "known
-  /// value" signal from strcmp-leaked keywords and delimiter checks).
+  /// ParserGuidedSearcher (v2 — match-depth priority).
   ///
-  /// Tier 1 (known-value, DFS): states where the fork pinned an input byte
-  ///   to a specific constant — rides the keyword chain deep.
-  /// Tier 2 (BFS): all states in FIFO order — fans out across siblings.
-  /// Tier 3 (covnew): weighted random by coverage-new — drives progression.
+  /// Accelerates KLEE on parser-heavy subjects by tracking how many
+  /// input-byte-equality chains each state has completed (its "match
+  /// depth").  A completed chain corresponds to a successful keyword
+  /// lookup (e.g. strcmp matching "del"), so higher match depth means
+  /// the state has progressed further through the parser.
   ///
-  /// Selection round-robins across tiers, skipping empty ones.
+  /// States are bucketed by match depth.  Selection favours the highest
+  /// non-empty bucket (DFS within bucket), with periodic covnew fallback
+  /// to maintain coverage breadth.
+  ///
+  /// Match-depth tracking: when a state's newest constraint is a byte
+  /// equality, it is "in a chain".  When the next fork produces a
+  /// non-byte-equality constraint, the chain has ended — the state's
+  /// parserMatchDepth is incremented.
   class ParserGuidedSearcher final : public Searcher {
-    std::vector<ExecutionState *> tier1States;
-    std::unordered_set<ExecutionState *> tier1Set;
+    /// States bucketed by parserMatchDepth.  Key = depth, value = deque
+    /// of states (DFS: select from back, add to back).
+    std::map<uint32_t, std::deque<ExecutionState *>> depthBuckets;
 
-    std::deque<ExecutionState *> tier2States;
+    /// Track which bucket each state is in for O(1) removal.
+    std::unordered_map<ExecutionState *, uint32_t> stateBucket;
 
-    std::unique_ptr<WeightedRandomSearcher> tier3Searcher;
+    std::unique_ptr<WeightedRandomSearcher> covnewSearcher;
 
     unsigned roundRobinIndex{0};
 
-    uint64_t tier1Selections{0};
-    uint64_t tier2Selections{0};
-    uint64_t tier3Selections{0};
-    uint64_t tier1Classifications{0};
+    uint64_t depthSelections{0};
+    uint64_t covnewSelections{0};
+    uint64_t matchCompletions{0};
 
-    void addToTier1(ExecutionState *state);
-    void removeFromTier1(ExecutionState *state);
+    void addState(ExecutionState *state);
+    void removeState(ExecutionState *state);
+    void classifyAndUpdate(ExecutionState *state, bool newConstraintIsByteEq);
 
   public:
     explicit ParserGuidedSearcher(RNG &rng);
