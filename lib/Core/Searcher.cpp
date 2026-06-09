@@ -593,13 +593,12 @@ void ParserGuidedSearcher::removeState(ExecutionState *state) {
 
 void ParserGuidedSearcher::classifyAndUpdate(ExecutionState *state,
                                               bool newConstraintIsByteEq) {
-  // Detect completed byte-equality chain: previous constraint was a byte
-  // equality, current one is not — the keyword match just finished.
-  if (state->prevConstraintWasByteEq && !newConstraintIsByteEq) {
+  // v3: increment depth for every byte equality — each matched byte
+  // (whether from strcmp or single-character dispatch) counts as +1.
+  if (newConstraintIsByteEq) {
     state->parserMatchDepth++;
-    ++matchCompletions;
+    ++byteEqHits;
   }
-  state->prevConstraintWasByteEq = newConstraintIsByteEq;
 }
 
 ParserGuidedSearcher::ParserGuidedSearcher(RNG &rng)
@@ -612,13 +611,13 @@ ParserGuidedSearcher::~ParserGuidedSearcher() {
   for (const auto &pair : depthBuckets)
     if (pair.first > maxDepth)
       maxDepth = pair.first;
-  klee_message("ParserGuidedSearcher v2 stats: "
+  klee_message("ParserGuidedSearcher v3 stats: "
                "selections depth=%lu covnew=%lu total=%lu | "
-               "match completions=%lu | max depth seen=%u",
+               "byte-eq hits=%lu | max depth seen=%u",
                (unsigned long)depthSelections,
                (unsigned long)covnewSelections,
                (unsigned long)total,
-               (unsigned long)matchCompletions,
+               (unsigned long)byteEqHits,
                (unsigned)maxDepth);
 }
 

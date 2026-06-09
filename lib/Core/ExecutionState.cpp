@@ -99,7 +99,6 @@ ExecutionState::ExecutionState(const ExecutionState& state):
     incomingBBIndex(state.incomingBBIndex),
     depth(state.depth),
     parserMatchDepth(state.parserMatchDepth),
-    prevConstraintWasByteEq(state.prevConstraintWasByteEq),
     addressSpace(state.addressSpace),
     stackAllocator(state.stackAllocator),
     heapAllocator(state.heapAllocator),

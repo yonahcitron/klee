@@ -314,10 +314,9 @@ namespace klee {
   /// non-empty bucket (DFS within bucket), with periodic covnew fallback
   /// to maintain coverage breadth.
   ///
-  /// Match-depth tracking: when a state's newest constraint is a byte
-  /// equality, it is "in a chain".  When the next fork produces a
-  /// non-byte-equality constraint, the chain has ended — the state's
-  /// parserMatchDepth is incremented.
+  /// Match-depth tracking (v3): every byte equality in a state's
+  /// constraint set increments parserMatchDepth by 1.  This counts
+  /// individual character matches, not completed chains.
   class ParserGuidedSearcher final : public Searcher {
     /// States bucketed by parserMatchDepth.  Key = depth, value = deque
     /// of states (DFS: select from back, add to back).
@@ -332,7 +331,7 @@ namespace klee {
 
     uint64_t depthSelections{0};
     uint64_t covnewSelections{0};
-    uint64_t matchCompletions{0};
+    uint64_t byteEqHits{0};
 
     void addState(ExecutionState *state);
     void removeState(ExecutionState *state);
