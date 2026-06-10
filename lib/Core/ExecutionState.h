@@ -179,18 +179,14 @@ public:
   /// @brief Exploration depth, i.e., number of times KLEE branched for this state
   std::uint32_t depth = 0;
 
-  /// @brief Count of distinct constant values matched via byte equality
-  /// on input bytes.  Used by ParserGuidedSearcher to prioritise states
-  /// that have exercised more of the parser's character vocabulary.
-  /// Only the first Eq(Read(stdin, _), C) for each distinct C increments
-  /// this — repeated matches of the same constant (e.g. checking '\n' at
-  /// every string position) do not inflate depth.
-  std::uint32_t parserMatchDepth = 0;
+  /// @brief Accumulated parser-match depth with harmonic weighting.
+  /// Each byte equality Eq(Read(stdin,_), C) contributes 1/n where n
+  /// is how many times C has been matched by this state.  Bucketed by
+  /// floor() for scheduling.
+  double parserMatchDepth = 0.0;
 
-  /// @brief Set of constant byte values already credited to this state's
-  /// parserMatchDepth.  Prevents repeated depth increments for the same
-  /// character (e.g. escape-switch arms revisited across string positions).
-  std::set<std::uint8_t> seenMatchConstants;
+  /// @brief Per-constant match count for harmonic weighting.
+  std::map<std::uint8_t, std::uint32_t> matchConstantCounts;
 
   /// @brief Address space used by this state (e.g. Global and Heap)
   AddressSpace addressSpace;

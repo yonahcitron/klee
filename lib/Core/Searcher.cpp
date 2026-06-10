@@ -574,9 +574,9 @@ ParserGuidedSearcher::getInputByteEqConstant(const ref<Expr> &e) {
 }
 
 void ParserGuidedSearcher::addState(ExecutionState *state) {
-  uint32_t depth = state->parserMatchDepth;
-  depthBuckets[depth].push_back(state);
-  stateBucket[state] = depth;
+  uint32_t bucket = static_cast<uint32_t>(state->parserMatchDepth);
+  depthBuckets[bucket].push_back(state);
+  stateBucket[state] = bucket;
 }
 
 void ParserGuidedSearcher::removeState(ExecutionState *state) {
@@ -595,14 +595,13 @@ void ParserGuidedSearcher::removeState(ExecutionState *state) {
 
 void ParserGuidedSearcher::classifyAndUpdate(ExecutionState *state,
                                               std::optional<uint8_t> byteEqConst) {
-  // v4: only increment depth for distinct constant values.  The first
-  // Eq(Read(stdin,_), C) for a given C earns +1; subsequent matches of
-  // the same C (e.g. checking '\n' at every string position) do not.
+  // v5: harmonic weighting — each byte equality Eq(Read(stdin,_), C)
+  // contributes 1/n where n is how many times this state has matched C.
+  // First match = +1, second = +0.5, third = +0.33, etc.
   if (byteEqConst.has_value()) {
     ++byteEqHits;
-    if (state->seenMatchConstants.insert(byteEqConst.value()).second) {
-      state->parserMatchDepth++;
-    }
+    uint32_t n = ++state->matchConstantCounts[byteEqConst.value()];
+    state->parserMatchDepth += 1.0 / n;
   }
 }
 
@@ -616,9 +615,9 @@ ParserGuidedSearcher::~ParserGuidedSearcher() {
   for (const auto &pair : depthBuckets)
     if (pair.first > maxDepth)
       maxDepth = pair.first;
-  klee_message("ParserGuidedSearcher v4 stats: "
+  klee_message("ParserGuidedSearcher v5 stats: "
                "selections depth=%lu covnew=%lu total=%lu | "
-               "byte-eq hits=%lu (distinct credited) | max depth seen=%u",
+               "byte-eq hits=%lu | max bucket seen=%u",
                (unsigned long)depthSelections,
                (unsigned long)covnewSelections,
                (unsigned long)total,
