@@ -6,6 +6,7 @@ on:
     branches: master
   push:
     branches: master
+  workflow_dispatch:
 
 # Defaults for building KLEE
 env:
@@ -166,6 +167,38 @@ jobs:
             echo "::group::Testing"
             ctest --build-generator Ninja --build-and-test . build
             echo "::endgroup::"
+
+  Arch:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        # Oldest and newest supported LLVM only, to bound CI cost.
+        # LLVM 15 additionally builds GCC 11 and LLVM from source
+        # (see arch-gcc11-helper.inc); LLVM 17 builds with the system
+        # toolchain.
+        name: [
+          "LLVM 17",
+          "LLVM 15",
+        ]
+        include:
+          - name: "LLVM 17"
+            env:
+              LLVM_VERSION: 17
+          - name: "LLVM 15"
+            env:
+              LLVM_VERSION: 15
+    env:
+      BASE_IMAGE: archlinux:latest
+      REPOSITORY: ghcr.io/klee
+      STP_VERSION: master
+    steps:
+      - name: Checkout KLEE source code
+        uses: actions/checkout@v6
+      - name: Build KLEE
+        env: ${{ matrix.env }}
+        run: scripts/build/build.sh klee --docker --create-final-image
+      - name: Run tests
+        run: scripts/build/run-tests.sh --run-docker --debug
 
   Docker:
     runs-on: ubuntu-22.04
