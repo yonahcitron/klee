@@ -16,11 +16,18 @@ build_z3() {
   local LDFLAGS=""
   local CC=""
   local CXX=""
-  
+
+  # GCC 14+ enables -Wtemplate-body which catches latent bugs in
+  # uninstantiated templates. Z3 4.8.x has such issues; suppress the
+  # diagnostic so the build succeeds with modern toolchains.
+  if g++ -Wno-template-body -x c++ -c /dev/null -o /dev/null 2>/dev/null; then
+    CXXFLAGS="-Wno-template-body"
+  fi
+
   # Check if sanitizers should be used to build z3
   if [[ "${SANITIZER_SUFFIX}x" != "x" ]]; then
     CFLAGS="${SANITIZER_C_FLAGS[*]}"
-    CXXFLAGS="${SANITIZER_CXX_FLAGS[*]}"
+    CXXFLAGS="${CXXFLAGS} ${SANITIZER_CXX_FLAGS[*]}"
     LDFLAGS="${SANITIZER_LD_FLAGS[*]}"
     
     CC="${SANITIZER_C_COMPILER}"
