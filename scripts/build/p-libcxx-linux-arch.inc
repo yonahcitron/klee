@@ -1,20 +1,19 @@
 install_build_dependencies_libcxx() {
   source "${DIR}/common-functions"
 
-  with_sudo apt-get update -y
   dependencies=(
-    ca-certificates
     base-devel
+    ca-certificates
+    curl
     git
     python
-    python-pip
-    curl
-    file # Needed for wllvm
+    python-setuptools # provides distutils (removed in Python 3.12+)
   )
 
-  with_sudo pacman --no-confirm -S "${dependencies[@]}"
+  with_sudo pacman -Syu --needed --noconfirm "${dependencies[@]}"
 
-  pip install --user wllvm
-  base_path="$(python -m site --user-base)"
-  export PATH="$PATH:${base_path}/bin"
+  # Create venv and bootstrap pip inside it (avoids system pip conflicts)
+  /usr/bin/python3 -m venv --clear "${BASE}/wllvm-venv"
+  "${BASE}/wllvm-venv/bin/python" -m pip install --quiet wllvm
+  export PATH="${BASE}/wllvm-venv/bin:$PATH"
 }
