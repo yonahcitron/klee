@@ -42,7 +42,7 @@ jobs:
           "ASan",
           "UBSan",
           "Z3 only",
-#          "STP master",
+          "STP master",
           "Latest klee-uclibc",
           "Asserts disabled",
           "No TCMalloc, optimised runtime",
@@ -78,10 +78,10 @@ jobs:
             env:
               SOLVERS: Z3
           # Test we can build against STP master
-#          - name: "STP master"
-#            env:
-#              SOLVERS: STP
-#              STP_VERSION: master
+          - name: "STP master"
+            env:
+              SOLVERS: STP
+              STP_VERSION: master
           # Check we can build latest klee-uclibc branch
           - name: "Latest klee-uclibc"
             env:
