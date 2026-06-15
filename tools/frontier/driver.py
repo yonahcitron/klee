@@ -75,8 +75,16 @@ class Frontier:
         #       U[-0]=... , 96% of run9's valid corpus) cannot monopolise pops
         #       and starve every other root. Survival keeps the valley alive;
         #       root_fair is what actually pops it. They are co-required.
+        #   prefer_depth : among equal-novelty entries, pop the DEEPEST prefix
+        #       (drive a lineage down depth-first) instead of the shortest.
+        #       v2 left the shortest-first tiebreaker, so survival flooded the
+        #       priority-0 tier with shallow prefixes and selection went
+        #       breadth-first — run10 luac never exceeded length 4, too shallow
+        #       for any keyword statement (`do end` needs 6). This is the v3
+        #       fix: novelty still dominates; this only re-orders ties.
         self.survival_budget = args.survival_budget
         self.root_fair = args.root_fair
+        self.prefer_depth = args.prefer_depth
         self.seen = set()        # sha1 of candidate bytes
         self.edges = set()       # global showmap edge ids
         self.heap = []           # global mode: (-new_edges, len, seq, bytes, budget)
@@ -91,7 +99,8 @@ class Frontier:
         self.push(b"", 1, self.survival_budget)   # start from the empty prefix
 
     def push(self, prefix, new_edges, budget):
-        entry = (-new_edges, len(prefix), self.seq, prefix, budget)
+        length_key = -len(prefix) if self.prefer_depth else len(prefix)
+        entry = (-new_edges, length_key, self.seq, prefix, budget)
         self.seq += 1
         if self.root_fair:
             root = prefix[:1]
@@ -289,6 +298,11 @@ def main():
                     help="round-robin over first-byte buckets instead of one "
                          "global novelty heap, so the basin cannot monopolise "
                          "pops (v1 = off)")
+    ap.add_argument("--prefer-depth", action="store_true",
+                    help="among equal-novelty entries pop the deepest prefix "
+                         "(depth-first within a lineage) instead of the "
+                         "shortest; needed so survival does not thrash "
+                         "breadth-first (v3, off in v1/v2)")
     ap.add_argument("--keep-iters", action="store_true")
     args = ap.parse_args()
     Frontier(args).run()

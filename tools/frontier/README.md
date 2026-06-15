@@ -88,9 +88,19 @@ step) monopolises every pop. Two opt-in, co-required flags address it:
 - `--root-fair` (default off): round-robin over first-byte buckets
   (best-first *within* a bucket) instead of one global heap, so the
   high-novelty basin cannot starve every other root.
+- `--prefer-depth` (default off, **v3**): among equal-novelty entries,
+  pop the *deepest* prefix instead of the shortest.
 
-Survival keeps the valley alive; root-fair is what actually pops it —
-neither works alone. Both off ⇒ identical to v1 (and to run9). Note
-these address short keywords (≤ window) and extension to valid
-statements; long keywords (≥5 bytes) additionally need a wider
-`FRONTIER_WINDOW` to avoid a blind multi-byte valley — a separate lever.
+Survival keeps the valley alive; root-fair is what pops it — but run10
+showed the pair is not enough on its own. The heap's second key was
+length *ascending* (pFuzzer minimality), so once survival floods the
+priority-0 tier with shallow prefixes, selection goes breadth-first:
+run10 luac never exceeded length 4, while `do end` needs 6 and
+`if x then end` ~13 — structurally too shallow for any keyword. v3 flips
+that tiebreaker (`--prefer-depth`): novelty still dominates, but ties —
+including the survival pile — go to the deepest prefix, so a lineage is
+driven down depth-first to where the next keyword token fires. Config
+labels: **v1** = no flags (= run9); **v2** = `--survival-budget 8
+--root-fair`; **v3** = v2 `+ --prefer-depth`. Long keywords (≥5 bytes)
+still also need a wider `FRONTIER_WINDOW` (blind multi-byte valley) — a
+separate, later lever.
