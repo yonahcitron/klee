@@ -85,6 +85,17 @@ class Frontier:
         self.survival_budget = args.survival_budget
         self.root_fair = args.root_fair
         self.prefer_depth = args.prefer_depth
+        # v5: steer by the program's own comparison signal instead of coverage.
+        #   steer_score : queue priority is a 'SCORE <n>' the native harness
+        #       prints — a comparison-match depth read from the program's
+        #       comparison (pFuzzer's signal: how close the input got to a
+        #       gated token), NOT afl-showmap edge novelty. Coverage novelty
+        #       is captured by trivially-valid productions (runs 9-12);
+        #       comparison-match is not.
+        #   max_cands : cap candidates classified per iteration so a wide
+        #       window's candidate flood cannot starve prefix-building.
+        self.steer_score = args.steer_score
+        self.max_cands = args.max_cands
         self.seen = set()        # sha1 of candidate bytes
         self.edges = set()       # global showmap edge ids
         self.heap = []           # global mode: (-new_edges, len, seq, bytes, budget)
@@ -172,6 +183,34 @@ class Frontier:
         self.edges |= new
         return len(new)
 
+    def classify_score(self, data):
+        """Run the native harness; return (exit_code, score). score is the max
+        'SCORE <n>' it prints to stderr — a comparison-match depth lifted from
+        the program's own comparison (e.g. an instrumented strcmp), so the
+        keyword values come from the program, not a known list."""
+        try:
+            r = subprocess.run([self.args.native_bin], input=data,
+                               capture_output=True, timeout=5)
+        except subprocess.TimeoutExpired:
+            return -1, 0
+        except OSError:
+            return -2, 0
+        score = 0
+        for line in r.stderr.splitlines():
+            if line.startswith(b"SCORE "):
+                try:
+                    score = max(score, int(line[6:]))
+                except ValueError:
+                    pass
+        return r.returncode, score
+
+    def measure(self, data):
+        """(exit_code, signal); signal is the queue-steering quantity —
+        comparison-match score (v5) or afl-showmap edge novelty (default)."""
+        if self.steer_score:
+            return self.classify_score(data)
+        return self.classify(data), self.novelty(data)
+
     # ---- one KLEE iteration --------------------------------------------
     def klee_iter(self, prefix, iter_time):
         out = self.klee_dir / f"iter-{self.n_iter:06d}"
@@ -238,6 +277,8 @@ class Frontier:
                 continue
             self.n_iter += 1
             cands = self.klee_iter(prefix, iter_time)
+            if self.max_cands and len(cands) > self.max_cands:
+                cands = cands[:self.max_cands]
             fresh = 0
             for cand in cands:
                 h = hashlib.sha1(cand).hexdigest()
@@ -246,23 +287,22 @@ class Frontier:
                 self.seen.add(h)
                 fresh += 1
                 self.n_candidates += 1
-                rc = self.classify(cand)
-                new_edges = self.novelty(cand)
+                rc, signal = self.measure(cand)
                 if rc == 0:
                     self.n_valid += 1
                     (self.valid_dir / f"{self.n_valid:06d}.bin"
                      ).write_bytes(cand)
-                if new_edges > 0 or rc == 0:
+                if signal > 0 or rc == 0:
                     (self.queue_dir / f"{h[:16]}.bin").write_bytes(cand)
-                if new_edges > 0:
-                    # Novel: full priority, budget refilled.
-                    self.push(cand, new_edges, self.survival_budget)
+                if signal > 0:
+                    # Promising: full priority, budget refilled.
+                    self.push(cand, signal, self.survival_budget)
                 elif budget > 0:
-                    # Zero-novelty but still in survival budget: keep it alive
+                    # No signal but still in survival budget: keep it alive
                     # at floor priority so it can reach a downstream peak.
                     self.push(cand, 0, budget - 1)
                 self.emit(event="cand", n=self.n_candidates, len=len(cand),
-                          rc=rc, new_edges=new_edges, valid=self.n_valid)
+                          rc=rc, new_edges=signal, valid=self.n_valid)
             if fresh:
                 idle_refills = 0
             self.emit(event="iter", i=self.n_iter, plen=len(prefix),
@@ -280,8 +320,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--subject-bc", required=True)
     ap.add_argument("--native-bin", required=True,
-                    help="AFL-instrumented harness (classification + showmap)")
-    ap.add_argument("--showmap", required=True, help="path to afl-showmap")
+                    help="native harness: classification + showmap (default) "
+                         "or SCORE output (--steer-score)")
+    ap.add_argument("--showmap", default=None,
+                    help="path to afl-showmap (required unless --steer-score)")
     ap.add_argument("--klee", default="klee")
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--max-seconds", type=int, default=3600)
@@ -303,8 +345,17 @@ def main():
                          "(depth-first within a lineage) instead of the "
                          "shortest; needed so survival does not thrash "
                          "breadth-first (v3, off in v1/v2)")
+    ap.add_argument("--steer-score", action="store_true",
+                    help="steer the queue by the 'SCORE <n>' the native "
+                         "harness prints (comparison-match depth) instead of "
+                         "afl-showmap edge novelty (v5)")
+    ap.add_argument("--max-cands", type=int, default=0,
+                    help="cap candidates classified per iteration (0 = no "
+                         "cap); stops a wide window's flood starving the loop")
     ap.add_argument("--keep-iters", action="store_true")
     args = ap.parse_args()
+    if not args.steer_score and not args.showmap:
+        ap.error("--showmap is required unless --steer-score is set")
     Frontier(args).run()
 
 
