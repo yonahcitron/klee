@@ -66,3 +66,31 @@ per-iteration records).
 - `FRONTIER_WINDOW` (compile-time, default 4): window width; wider =
   more paths per iteration, fewer iterations per byte of progress.
 - `--max-len`: stop extending prefixes beyond this (memory/corpus cap).
+
+## Queue strategy (v2)
+
+Default (no flags) is the original best-first behaviour: a single
+global heap keyed by `(new edges desc, length asc)`, and a candidate is
+re-queued only if it found new edges. run9 showed this collapses into
+one basin — 96 % of luac's valid corpus was extensions of a single
+`U[-0]=...` root, with zero keyword-gated productions. A seeded-prefix
+probe found the cause: keywords *are* reachable and high-value (a
+recognised `while` fires 88 edges an identifier doesn't), but the route
+crosses partial-identifier prefixes (`w`→`wh`→`whi`→`whil`) that intern
+as plain names with ~0 novelty, so the re-push gate deletes them before
+they reach the keyword, while the basin (which never hits a zero-novelty
+step) monopolises every pop. Two opt-in, co-required flags address it:
+
+- `--survival-budget N` (default 0 = off): a zero-novelty prefix
+  survives `N` consecutive extensions at floor priority instead of being
+  pruned on the first, so a lineage can cross the valley. Any novel step
+  refills the budget.
+- `--root-fair` (default off): round-robin over first-byte buckets
+  (best-first *within* a bucket) instead of one global heap, so the
+  high-novelty basin cannot starve every other root.
+
+Survival keeps the valley alive; root-fair is what actually pops it —
+neither works alone. Both off ⇒ identical to v1 (and to run9). Note
+these address short keywords (≤ window) and extension to valid
+statements; long keywords (≥5 bytes) additionally need a wider
+`FRONTIER_WINDOW` to avoid a blind multi-byte valley — a separate lever.

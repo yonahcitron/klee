@@ -63,18 +63,69 @@ class Frontier:
             d.mkdir(parents=True, exist_ok=True)
         self.log = open(self.work / "log.jsonl", "a", buffering=1)
 
+        # v2 queue strategy. Both default to the v1 behaviour when unset, so
+        # a plain invocation (run9's run.sh) is byte-for-byte unchanged.
+        #   survival_budget > 0 : a zero-novelty prefix survives that many
+        #       consecutive extensions before it is dropped, instead of being
+        #       pruned on the first one. Lets a lineage cross the identifier
+        #       "valley" (w -> wh -> whi -> whil, each ~0 new edges) to reach
+        #       the keyword peak (while, +88 edges) that the run9 probe found.
+        #   root_fair : round-robin over first-byte buckets instead of one
+        #       global novelty heap, so the high-novelty basin (e.g. luac's
+        #       U[-0]=... , 96% of run9's valid corpus) cannot monopolise pops
+        #       and starve every other root. Survival keeps the valley alive;
+        #       root_fair is what actually pops it. They are co-required.
+        self.survival_budget = args.survival_budget
+        self.root_fair = args.root_fair
         self.seen = set()        # sha1 of candidate bytes
         self.edges = set()       # global showmap edge ids
-        self.heap = []           # (-new_edges, len, seq, bytes)
+        self.heap = []           # global mode: (-new_edges, len, seq, bytes, budget)
+        self.buckets = {}        # root_fair mode: first-byte -> heap
+        self.roots = []          # root_fair mode: bucket keys in round-robin order
+        self.rr = 0              # round-robin cursor
+        self.n_queued = 0        # entries currently queued (either mode)
         self.seq = 0
         self.n_valid = 0
         self.n_iter = 0
         self.n_candidates = 0
-        self.push(b"", 1)        # start from the empty prefix
+        self.push(b"", 1, self.survival_budget)   # start from the empty prefix
 
-    def push(self, prefix, new_edges):
-        heapq.heappush(self.heap, (-new_edges, len(prefix), self.seq, prefix))
+    def push(self, prefix, new_edges, budget):
+        entry = (-new_edges, len(prefix), self.seq, prefix, budget)
         self.seq += 1
+        if self.root_fair:
+            root = prefix[:1]
+            bucket = self.buckets.get(root)
+            if bucket is None:
+                bucket = self.buckets[root] = []
+                self.roots.append(root)
+            heapq.heappush(bucket, entry)
+        else:
+            heapq.heappush(self.heap, entry)
+        self.n_queued += 1
+
+    def pop(self):
+        """Next (prefix, budget) to extend, or None if the queue is empty.
+
+        Global mode: strict best-first (-new_edges, then shortest, then FIFO).
+        root_fair mode: round-robin over first-byte buckets, taking each
+        bucket's best entry — fair across roots, best-first within a root.
+        """
+        if self.root_fair:
+            n = len(self.roots)
+            for _ in range(n):
+                bucket = self.buckets[self.roots[self.rr % n]]
+                self.rr += 1
+                if bucket:
+                    self.n_queued -= 1
+                    entry = heapq.heappop(bucket)
+                    return entry[3], entry[4]
+            return None
+        if not self.heap:
+            return None
+        self.n_queued -= 1
+        entry = heapq.heappop(self.heap)
+        return entry[3], entry[4]
 
     def emit(self, **kw):
         kw["t"] = round(time.time() - self.t0, 1)
@@ -149,15 +200,15 @@ class Frontier:
         idle_refills = 0
 
         while time.time() < deadline:
-            if not self.heap:
+            if self.n_queued == 0:
                 # Re-extend banked valid inputs (KLEE truncation + search
                 # randomness mean a re-run can yield new continuations);
                 # fall back to the empty prefix.
                 refill = sorted(self.valid_dir.glob("*.bin"))[-20:]
                 for p in refill:
-                    self.push(p.read_bytes(), 0)
+                    self.push(p.read_bytes(), 0, self.survival_budget)
                 if not refill:
-                    self.push(b"", 0)
+                    self.push(b"", 0, self.survival_budget)
                 idle_refills += 1
                 if idle_refills > 50:
                     self.emit(event="giving-up", reason="queue dry")
@@ -170,7 +221,10 @@ class Frontier:
                 break
             iter_time = min(self.args.iter_time, remaining)
 
-            _, _, _, prefix = heapq.heappop(self.heap)
+            popped = self.pop()
+            if popped is None:
+                continue
+            prefix, budget = popped
             if len(prefix) >= self.args.max_len:
                 continue
             self.n_iter += 1
@@ -192,13 +246,18 @@ class Frontier:
                 if new_edges > 0 or rc == 0:
                     (self.queue_dir / f"{h[:16]}.bin").write_bytes(cand)
                 if new_edges > 0:
-                    self.push(cand, new_edges)
+                    # Novel: full priority, budget refilled.
+                    self.push(cand, new_edges, self.survival_budget)
+                elif budget > 0:
+                    # Zero-novelty but still in survival budget: keep it alive
+                    # at floor priority so it can reach a downstream peak.
+                    self.push(cand, 0, budget - 1)
                 self.emit(event="cand", n=self.n_candidates, len=len(cand),
                           rc=rc, new_edges=new_edges, valid=self.n_valid)
             if fresh:
                 idle_refills = 0
             self.emit(event="iter", i=self.n_iter, plen=len(prefix),
-                      ktests=len(cands), fresh=fresh, queue=len(self.heap),
+                      ktests=len(cands), fresh=fresh, queue=self.n_queued,
                       valid=self.n_valid, edges=len(self.edges))
 
         self.emit(event="done", iters=self.n_iter, valid=self.n_valid,
@@ -222,6 +281,14 @@ def main():
     ap.add_argument("--klee-memory", type=int, default=2000)
     ap.add_argument("--max-len", type=int, default=512,
                     help="stop extending prefixes beyond this length")
+    ap.add_argument("--survival-budget", type=int, default=0,
+                    help="consecutive zero-novelty extensions a lineage may "
+                         "survive before being dropped (0 = v1: prune on the "
+                         "first; >0 lets it cross the identifier valley)")
+    ap.add_argument("--root-fair", action="store_true",
+                    help="round-robin over first-byte buckets instead of one "
+                         "global novelty heap, so the basin cannot monopolise "
+                         "pops (v1 = off)")
     ap.add_argument("--keep-iters", action="store_true")
     args = ap.parse_args()
     Frontier(args).run()
