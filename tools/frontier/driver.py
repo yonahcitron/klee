@@ -95,6 +95,7 @@ class Frontier:
         #   max_cands : cap candidates classified per iteration so a wide
         #       window's candidate flood cannot starve prefix-building.
         self.steer_score = args.steer_score
+        self.steer_survival = args.steer_survival
         self.max_cands = args.max_cands
         self.seen = set()        # sha1 of candidate bytes
         self.edges = set()       # global showmap edge ids
@@ -184,31 +185,53 @@ class Frontier:
         return len(new)
 
     def classify_score(self, data):
-        """Run the native harness; return (exit_code, score). score is the max
-        'SCORE <n>' it prints to stderr — a comparison-match depth lifted from
-        the program's own comparison (e.g. an instrumented strcmp), so the
-        keyword values come from the program, not a known list."""
+        """Run the native harness; return (exit_code, depth, alive). The harness
+        prints 'SCORE <depth> [alive]' to stderr: depth is a comparison-match
+        depth lifted from the program's own comparison (e.g. an instrumented
+        strcmp — the keyword values come from the program, not a list); alive
+        (v6, default 1 if absent) is 1 iff that match broke at the input's end
+        (a recoverable prefix) rather than on a committed byte (dead)."""
         try:
             r = subprocess.run([self.args.native_bin], input=data,
                                capture_output=True, timeout=5)
         except subprocess.TimeoutExpired:
-            return -1, 0
+            return -1, 0, 0
         except OSError:
-            return -2, 0
-        score = 0
+            return -2, 0, 0
+        depth, alive = 0, 1
         for line in r.stderr.splitlines():
             if line.startswith(b"SCORE "):
+                parts = line.split()
                 try:
-                    score = max(score, int(line[6:]))
-                except ValueError:
+                    d = int(parts[1])
+                    if d >= depth:
+                        depth = d
+                        alive = int(parts[2]) if len(parts) > 2 else 1
+                except (ValueError, IndexError):
                     pass
-        return r.returncode, score
+        return r.returncode, depth, alive
 
     def measure(self, data):
         """(exit_code, signal); signal is the queue-steering quantity —
-        comparison-match score (v5) or afl-showmap edge novelty (default)."""
+        comparison-match score (v5/v6) or afl-showmap edge novelty (default)."""
         if self.steer_score:
-            return self.classify_score(data)
+            rc, depth, alive = self.classify_score(data)
+            if self.steer_survival:
+                # v6: survival/validity leads, comparison-match assists.
+                #   valid input  -> bank, top tier (keyword-valids rank highest);
+                #   alive prefix -> climb its keyword ladder by match depth;
+                #   dead fragment (match broke on a frozen byte) -> no priority,
+                #                   survival budget only, so it cannot starve the
+                #                   live prefixes the way raw depth did in v5.
+                if rc == 0:
+                    sig = 1000 + depth
+                elif alive:
+                    sig = depth
+                else:
+                    sig = 0
+            else:
+                sig = depth          # v5: raw match depth (can't tell whil/whila)
+            return rc, sig
         return self.classify(data), self.novelty(data)
 
     # ---- one KLEE iteration --------------------------------------------
@@ -349,6 +372,11 @@ def main():
                     help="steer the queue by the 'SCORE <n>' the native "
                          "harness prints (comparison-match depth) instead of "
                          "afl-showmap edge novelty (v5)")
+    ap.add_argument("--steer-survival", action="store_true",
+                    help="v6: combine the score with the harness's alive bit "
+                         "and exit code — valid > alive keyword-prefix > dead "
+                         "fragment — so dead matches and trivia cannot starve "
+                         "the live prefixes (requires --steer-score)")
     ap.add_argument("--max-cands", type=int, default=0,
                     help="cap candidates classified per iteration (0 = no "
                          "cap); stops a wide window's flood starving the loop")
