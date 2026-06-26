@@ -217,18 +217,16 @@ class Frontier:
         if self.steer_score:
             rc, depth, alive = self.classify_score(data)
             if self.steer_survival:
-                # v6: survival/validity leads, comparison-match assists.
-                #   valid input  -> bank, top tier (keyword-valids rank highest);
-                #   alive prefix -> climb its keyword ladder by match depth;
-                #   dead fragment (match broke on a frozen byte) -> no priority,
-                #                   survival budget only, so it cannot starve the
-                #                   live prefixes the way raw depth did in v5.
-                if rc == 0:
-                    sig = 1000 + depth
-                elif alive:
-                    sig = depth
-                else:
-                    sig = 0
+                # v6: comparison-match DEPTH leads; the alive bit only prunes
+                # dead ends. A match that broke on a committed byte (dead) and
+                # did not parse gets no priority (survival budget only);
+                # everything still live (alive prefix) or accepted (valid — and
+                # banked at generation regardless) is ranked by how deep it
+                # matched a keyword, so the deepest live ladder (`while`, 5)
+                # outranks trivial valids (`d;`, 1) and completes into
+                # `while(0);`. A flat valid bonus instead let one-char valids
+                # (`d;`, signal 1001) swamp the whole ladder — the first-cut bug.
+                sig = depth if (alive or rc == 0) else 0
             else:
                 sig = depth          # v5: raw match depth (can't tell whil/whila)
             return rc, sig
