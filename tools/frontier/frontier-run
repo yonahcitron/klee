@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# frontier-run — convenience wrapper: `python3 -m frontier` with the package dir
-# on PYTHONPATH, so it runs from anywhere. (`frontier` in the docs == this.)
-HERE="$(cd "$(dirname "$0")" && pwd)"
-exec env PYTHONPATH="${HERE}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m frontier "$@"
